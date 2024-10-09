@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aztecrabbit/bugscanner-go/pkg/queuescanner"
+	"github.com/aztecrabbit/Alama/pkg/queuescanner"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 )

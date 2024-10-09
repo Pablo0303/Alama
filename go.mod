@@ -1,4 +1,4 @@
-module github.com/aztecrabbit/bugscanner-go
+module github.com/aztecrabbit/Alama
 
 go 1.18
 

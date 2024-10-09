@@ -10,11 +10,11 @@ Install
 
 **Latest Release**
 
-	go install -v github.com/aztecrabbit/bugscanner-go@latest
+	go install -v github.com/aztecrabbit/Alama@latest
 
 **Latest Commit**
 
-	go install -v github.com/aztecrabbit/bugscanner-go@HEAD
+	go install -v github.com/aztecrabbit/Alama@HEAD
 
 
 #### Add go bin to PATH
@@ -31,7 +31,7 @@ Install
 Usage
 -----
 
-	bugscanner-go --help
+	Alama --help
 
 
 ### Before Scanning
@@ -50,17 +50,17 @@ Visit subfinder repo if you want to install subfinder [here](https://github.com/
 
 #### Scan Direct
 
-	bugscanner-go scan direct -f example.com.lst -o cf.lst
+	Alama scan direct -f example.com.lst -o cf.lst
 
 #### Scan CDN SSL
 
-	bugscanner-go scan cdn-ssl --proxy-filename cf.lst --target ws.example.com
+	Alama scan cdn-ssl --proxy-filename cf.lst --target ws.example.com
 
 * target server response must be returning 101 status code.
 
 #### Scan Server Name Indication
 
-	bugscanner-go scan sni -f example.com.lst --threads 16 --timeout 8 --deep 3
+	Alama scan sni -f example.com.lst --threads 16 --timeout 8 --deep 3
 
 #### Note
 
