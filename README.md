@@ -1,20 +1,17 @@
-# Bugscanner Go
+# Alama Scanner
 
-This tool is dedicated to [DARKTUNNEL.NET](https://www.darktunnel.net), please support us if you find this tool useful.
-
-Join to our telegram group @darktunnel_group or click [here](https://t.me/darktunnel_group).
-
+Esta herramienta esta basada en bugscanner-go con algunas mejoras. Gracias a los creadores de Bugscanner-go
 
 Install
 -------
 
 **Latest Release**
 
-	go install -v github.com/aztecrabbit/Alama@latest
+	go install -v github.com/Pablo0303/Alama@latest
 
 **Latest Commit**
 
-	go install -v github.com/aztecrabbit/Alama@HEAD
+	go install -v github.com/Pablo0303/Alama@HEAD
 
 
 #### Add go bin to PATH
