@@ -11,10 +11,24 @@ import (
 
 var cfgFile string
 
+// Definir las variables para las opciones globales
+var (
+	ports        []string
+	timeout      int
+	threads      int
+	outputFile   string
+	proxy        string
+	server       string
+	payload      string
+	httpScan     bool
+	httpsScan    bool
+	httpMethods  []string
+)
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "Alama",
-	Short: "This tool is dedicated to DARKTUNNEL.NET, please support us if you find this tool useful.",
+	Short: "Esta herramienta esta libre de uso para aprendizaje sobre redes.",
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -31,6 +45,18 @@ func init() {
 	// will be global for your application.
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.Alama.yaml)")
+
+	// Agregar las nuevas opciones globales
+	rootCmd.PersistentFlags().StringSliceVarP(&ports, "port", "p", nil, "Ports to scan")
+	rootCmd.PersistentFlags().IntVarP(&timeout, "timeout", "t", 10, "Timeout for scans (in seconds)")
+	rootCmd.PersistentFlags().IntVarP(&threads, "threads", "T", 10, "Number of threads")
+	rootCmd.PersistentFlags().StringVarP(&outputFile, "outputfile", "o", "", "Output file")
+	rootCmd.PersistentFlags().StringVarP(&proxy, "proxy", "x", "", "Proxy to use (e.g., squid proxy 172.22.2.38)")
+	rootCmd.PersistentFlags().StringVarP(&server, "server", "s", "", "Websocket server domain/ip")
+	rootCmd.PersistentFlags().StringVarP(&payload, "payload", "d", "", "Custom payload for scans")
+	rootCmd.PersistentFlags().BoolVar(&httpScan, "http", false, "Perform HTTP scan")
+	rootCmd.PersistentFlags().BoolVar(&httpsScan, "https", false, "Perform HTTPS scan")
+	rootCmd.PersistentFlags().StringSliceVar(&httpMethods, "re", nil, "HTTP/HTTPS request methods to use for the sweep scan")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -69,3 +95,4 @@ func initConfig() {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
 }
+
