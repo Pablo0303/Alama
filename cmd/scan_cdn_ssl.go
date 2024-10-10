@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aztecrabbit/Alama/pkg/queuescanner"
+	"github.com/Pablo0303/Alama/pkg/queuescanner"
 	"github.com/spf13/cobra"
 )
 
