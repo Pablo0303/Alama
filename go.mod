@@ -1,4 +1,4 @@
-module github.com/aztecrabbit/Alama
+module github.com/Pablo0303/Alama
 
 go 1.18
 
