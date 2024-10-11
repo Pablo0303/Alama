@@ -1,288 +1,144 @@
 package cmd
 
 import (
-	"bufio"
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"net"
-	"os"
-	"regexp"
-	"strings"
-	"time"
+    "bufio"
+    "fmt"
+    "net"
+    "os"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/Pablo0303/Alama/pkg/queuescanner"
-	"github.com/spf13/cobra"
+    "github.com/go-ping/ping"
+    "github.com/spf13/cobra"
+    "github.com/fatih/color"
 )
 
-var scanProxyCmd = &cobra.Command{
-	Use:   "proxy",
-	Short: "Scan proxy -> payload -> target",
-	Run:   runScanProxy,
+// proxyScanCmd represents the proxyScan command
+var proxyScanCmd = &cobra.Command{
+    Use:   "proxy",
+    Short: "Scan a range of IPs or a list of IPs/hosts for proxies",
+    Run:   proxyScanRun,
 }
 
 var (
-	scanProxyFlagProxyCidr         string
-	scanProxyFlagProxyHost         string
-	scanProxyFlagProxyHostFilename string
-	scanProxyFlagProxyPort         int
-	scanProxyFlagBug               string
-	scanProxyFlagMethod            string
-	scanProxyFlagTarget            string
-	scanProxyFlagPath              string
-	scanProxyFlagProtocol          string
-	scanProxyFlagPayload           string
-	scanProxyFlagTimeout           int
-	scanProxyFlagOutput            string
+    proxyFlagCIDR    string
+    proxyFlagFile    string
+    proxyFlagOutput  string
+    proxyFlagTimeout int
+    proxyFlagDelay   int
+    proxyFlagCount   int
+    proxyFlagThreads int
+    proxyFlagProxy   string
 )
 
 func init() {
-	scanCmd.AddCommand(scanProxyCmd)
+    rootCmd.AddCommand(proxyScanCmd)
 
-	scanProxyCmd.Flags().StringVarP(&scanProxyFlagProxyCidr, "cidr", "c", "", "cidr proxy to scan e.g. 127.0.0.1/32")
-	scanProxyCmd.Flags().StringVar(&scanProxyFlagProxyHost, "proxy", "", "proxy without port")
-	scanProxyCmd.Flags().StringVarP(&scanProxyFlagProxyHostFilename, "filename", "f", "", "proxy filename without port")
-	scanProxyCmd.Flags().IntVarP(&scanProxyFlagProxyPort, "port", "p", 80, "proxy port")
-	scanProxyCmd.Flags().StringVarP(&scanProxyFlagBug, "bug", "B", "", "bug to use when proxy is ip instead of domain")
-	scanProxyCmd.Flags().StringVarP(&scanProxyFlagMethod, "method", "M", "GET", "request method")
-	scanProxyCmd.Flags().StringVar(&scanProxyFlagTarget, "target", "", "target server (response must be 101)")
-	scanProxyCmd.Flags().StringVar(&scanProxyFlagPath, "path", "/", "request path")
-	scanProxyCmd.Flags().StringVar(&scanProxyFlagProtocol, "protocol", "HTTP/1.1", "request protocol")
-	scanProxyCmd.Flags().StringVar(
-		&scanProxyFlagPayload, "payload", "[method] [path] [protocol][crlf]Host: [host][crlf]Upgrade: websocket[crlf][crlf]", "request payload for sending throught proxy",
-	)
-	scanProxyCmd.Flags().IntVar(&scanProxyFlagTimeout, "timeout", 3, "handshake timeout")
-	scanProxyCmd.Flags().StringVarP(&scanProxyFlagOutput, "output", "o", "", "output result")
-
-	scanProxyFlagMethod = strings.ToUpper(scanProxyFlagMethod)
+    proxyScanCmd.Flags().StringVarP(&proxyFlagCIDR, "cidr", "c", "", "CIDR range to scan")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagOutput, "output", "o", "", "Output file to save results")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagCount, "count", "n", 1, "Number of scan attempts per IP")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagThreads, "threads", "T", 50, "Number of concurrent threads")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagProxy, "proxy", "x", "", "Proxy and port to use (e.g., 192.168.1.1:8080)")
 }
 
-type scanProxyRequest struct {
-	ProxyHost string
-	ProxyPort int
-	Bug       string
-	Method    string
-	Target    string
-	Payload   string
+func proxyScanHost(ip string, timeout, count int, proxy string) bool {
+    // Implementar la lógica para usar el proxy si se especifica
+    pinger, err := ping.NewPinger(ip)
+    if err != nil {
+        return false
+    }
+    pinger.Count = count
+    pinger.Timeout = time.Duration(timeout) * time.Second
+    err = pinger.Run()
+    if err != nil {
+        return false
+    }
+    stats := pinger.Statistics()
+    return stats.PacketsRecv > 0
 }
 
-type scanProxyResponse struct {
-	Request      *scanProxyRequest
-	ResponseLine []string
-}
+func proxyScanRun(cmd *cobra.Command, args []string) {
+    var ips []string
 
-func scanProxy(c *queuescanner.Ctx, p *queuescanner.QueueScannerScanParams) {
-	req, ok := p.Data.(*scanProxyRequest)
-	if !ok {
-		return
-	}
+    if proxyFlagCIDR != "" {
+        ip, ipnet, err := net.ParseCIDR(proxyFlagCIDR)
+        if err != nil {
+            fmt.Println("Invalid CIDR:", err)
+            return
+        }
+        for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+            ips = append(ips, ip.String())
+        }
+    }
 
-	//
+    if proxyFlagFile != "" {
+        file, err := os.Open(proxyFlagFile)
+        if err != nil {
+            fmt.Println("Error opening file:", err)
+            return
+        }
+        defer file.Close()
 
-	var conn net.Conn
-	var err error
+        scanner := bufio.NewScanner(file)
+        for scanner.Scan() {
+            ips = append(ips, scanner.Text())
+        }
+        if err := scanner.Err(); err != nil {
+            fmt.Println("Error reading file:", err)
+            return
+        }
+    }
 
-	dnsErr := new(net.DNSError)
+    total := len(ips)
+    found := 0
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    sem := make(chan struct{}, proxyFlagThreads)
+    green := color.New(color.FgGreen).SprintFunc()
+    results := make([]string, 0)
 
-	proxyHostPort := fmt.Sprintf("%s:%d", req.ProxyHost, req.ProxyPort)
-	dialCount := 0
+    for i, ip := range ips {
+        wg.Add(1)
+        sem <- struct{}{}
+        go func(i int, ip string) {
+            defer wg.Done()
+            defer func() { <-sem }()
+            progress := float64(i+1) / float64(total) * 100
 
-	for {
-		dialCount++
-		if dialCount > 3 {
-			c.Log(colorB1.Sprintf("%s - Timeout", proxyHostPort))
-			return
-		}
-		conn, err = net.DialTimeout("tcp", proxyHostPort, 3*time.Second)
-		if err != nil {
-			if errors.As(err, &dnsErr) {
-				c.Log(colorB1.Sprint(proxyHostPort))
-				return
-			}
-			if e, ok := err.(net.Error); ok && e.Timeout() {
-				c.LogReplace(p.Name, "-", "Dial Timeout")
-				continue
-			}
-			if opError, ok := err.(*net.OpError); ok {
-				if syscalErr, ok := opError.Err.(*os.SyscallError); ok {
-					if syscalErr.Err.Error() == "network is unreachable" {
-						return
-					}
-				}
-			}
-			return
-		}
-		defer conn.Close()
-		break
-	}
+            if proxyScanHost(ip, proxyFlagTimeout, proxyFlagCount, proxyFlagProxy) {
+                mu.Lock()
+                found++
+                results = append(results, ip)
+                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                mu.Unlock()
+            }
 
-	//
+            // Actualizar la línea de progreso
+            mu.Lock()
+            logReplace(ip, found, total, i+1, progress)
+            mu.Unlock()
 
-	ctxResultTimeout, ctxResultTimeoutCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer ctxResultTimeoutCancel()
+            if proxyFlagDelay > 0 {
+                time.Sleep(time.Duration(proxyFlagDelay) * time.Millisecond)
+            }
+        }(i, ip)
+    }
+    wg.Wait()
 
-	chanResult := make(chan bool)
+    // Asegurarse de que la línea final se muestre correctamente
+    logReplace("", found, total, total, 100.00)
 
-	go func() {
-		payload := req.Payload
-		payload = strings.ReplaceAll(payload, "[host]", req.Target)
-		payload = strings.ReplaceAll(payload, "[crlf]", "[cr][lf]")
-		payload = strings.ReplaceAll(payload, "[cr]", "\r")
-		payload = strings.ReplaceAll(payload, "[lf]", "\n")
+    if proxyFlagOutput != "" {
+        err := os.WriteFile(proxyFlagOutput, []byte(strings.Join(results, "\n")), 0644)
+        if err != nil {
+            fmt.Println("Error writing to output file:", err)
+        }
+    }
 
-		_, err = conn.Write([]byte(payload))
-		if err != nil {
-			return
-		}
-
-		res := &scanProxyResponse{
-			Request:      req,
-			ResponseLine: make([]string, 0),
-		}
-
-		scanner := bufio.NewScanner(conn)
-		isPrefix := true
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				break
-			}
-			if isPrefix || strings.HasPrefix(line, "Location") || strings.HasPrefix(line, "Server") {
-				isPrefix = false
-				res.ResponseLine = append(res.ResponseLine, line)
-			}
-		}
-
-		resColor := colorD1
-
-		if len(res.ResponseLine) > 0 && strings.Contains(res.ResponseLine[0], " 101 ") {
-			resColor = colorG1
-			c.ScanSuccess(res, nil)
-		}
-
-		c.Log(resColor.Sprintf("%-32s  %s", proxyHostPort, strings.Join(res.ResponseLine, " -- ")))
-
-		chanResult <- true
-	}()
-
-	select {
-	case <-chanResult:
-		return
-	case <-ctxResultTimeout.Done():
-		return
-	}
-}
-
-func getScanProxyPayloadDecoded(bug ...string) string {
-	payload := scanProxyFlagPayload
-	payload = strings.ReplaceAll(payload, "[method]", scanProxyFlagMethod)
-	payload = strings.ReplaceAll(payload, "[path]", scanProxyFlagPath)
-	payload = strings.ReplaceAll(payload, "[protocol]", scanProxyFlagProtocol)
-	if len(bug) > 0 {
-		payload = strings.ReplaceAll(payload, "[bug]", bug[0])
-	}
-	return payload
-}
-
-func runScanProxy(cmd *cobra.Command, args []string) {
-	proxyHostList := make(map[string]bool)
-
-	if scanProxyFlagProxyHost != "" {
-		proxyHostList[scanProxyFlagProxyHost] = true
-	}
-
-	if scanProxyFlagProxyHostFilename != "" {
-		proxyHostFile, err := os.Open(scanProxyFlagProxyHostFilename)
-		if err != nil {
-			fmt.Println(err.Error())
-			os.Exit(1)
-		}
-		defer proxyHostFile.Close()
-
-		scanner := bufio.NewScanner(proxyHostFile)
-		for scanner.Scan() {
-			proxyHost := scanner.Text()
-			proxyHostList[proxyHost] = true
-		}
-	}
-
-	if scanProxyFlagProxyCidr != "" {
-		proxyHostListFromCidr, err := ipListFromCidr(scanProxyFlagProxyCidr)
-		if err != nil {
-			fmt.Printf("Converting ip list from cidr error: %s", err.Error())
-			os.Exit(1)
-		}
-
-		for _, proxyHost := range proxyHostListFromCidr {
-			proxyHostList[proxyHost] = true
-		}
-	}
-
-	//
-
-	queueScanner := queuescanner.NewQueueScanner(scanFlagThreads, scanProxy)
-	regexpIsIP := regexp.MustCompile(`\d+$`)
-
-	for proxyHost := range proxyHostList {
-		bug := scanProxyFlagBug
-
-		if bug == "" {
-			if regexpIsIP.MatchString(proxyHost) {
-				bug = scanProxyFlagTarget
-			} else {
-				bug = proxyHost
-			}
-		}
-
-		if scanProxyFlagPath == "/" {
-			bug = scanProxyFlagTarget
-		}
-
-		queueScanner.Add(&queuescanner.QueueScannerScanParams{
-			Name: fmt.Sprintf("%s:%d - %s", proxyHost, scanProxyFlagProxyPort, scanProxyFlagTarget),
-			Data: &scanProxyRequest{
-				ProxyHost: proxyHost,
-				ProxyPort: scanProxyFlagProxyPort,
-				Bug:       bug,
-				Method:    scanProxyFlagMethod,
-				Target:    scanProxyFlagTarget,
-				Payload:   getScanProxyPayloadDecoded(bug),
-			},
-		})
-	}
-
-	fmt.Printf("%s\n\n", getScanProxyPayloadDecoded())
-
-	queueScanner.Start(func(c *queuescanner.Ctx) {
-		if len(c.ScanSuccessList) == 0 {
-			return
-		}
-
-		c.Log("\n")
-
-		for _, scanSuccess := range c.ScanSuccessList {
-			res := scanSuccess.(*scanProxyResponse)
-			requestHostPort := fmt.Sprintf("%s:%d", res.Request.ProxyHost, res.Request.ProxyPort)
-			requestTargetBug := fmt.Sprintf("%s -- %s", res.Request.Target, res.Request.Bug)
-			if res.Request.Target == res.Request.Bug {
-				requestTargetBug = res.Request.Target
-			}
-			c.Log(colorG1.Sprintf("%-32s  %s -- %s", requestHostPort, requestTargetBug, res.Request.Payload))
-		}
-
-		jsonBytes, err := json.MarshalIndent(c.ScanSuccessList, "", "  ")
-		if err != nil {
-			fmt.Println(err.Error())
-			os.Exit(1)
-		}
-
-		if scanProxyFlagOutput != "" {
-			err := os.WriteFile(scanProxyFlagOutput, jsonBytes, 0644)
-			if err != nil {
-				fmt.Println(err.Error())
-				os.Exit(1)
-			}
-		}
-	})
+    // Agregar un salto de línea al final para evitar el símbolo del sistema
+    fmt.Print("\n")
 }

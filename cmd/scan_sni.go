@@ -1,117 +1,141 @@
 package cmd
 
 import (
-	"bufio"
-	"context"
-	"crypto/tls"
-	"fmt"
-	"net"
-	"os"
-	"strings"
-	"time"
+    "bufio"
+    "fmt"
+    "net"
+    "os"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/spf13/cobra"
-
-	"github.com/Pablo0303/Alama/pkg/queuescanner"
+    "github.com/go-ping/ping"
+    "github.com/spf13/cobra"
+    "github.com/fatih/color"
 )
 
-var sniCmd = &cobra.Command{
-	Use:   "sni",
-	Short: "Scan server name indication list from file",
-	Run:   runScanSNI,
+// sniScanCmd represents the sniScan command
+var sniScanCmd = &cobra.Command{
+    Use:   "sni",
+    Short: "Scan a range of IPs or a list of IPs/hosts for SNI",
+    Run:   sniScanRun,
 }
 
 var (
-	sniFlagFilename string
-	sniFlagDeep     int
-	sniFlagTimeout  int
+    sniFlagCIDR    string
+    sniFlagFile    string
+    sniFlagOutput  string
+    sniFlagTimeout int
+    sniFlagDelay   int
+    sniFlagCount   int
+    sniFlagThreads int
 )
 
 func init() {
-	scanCmd.AddCommand(sniCmd)
+    rootCmd.AddCommand(sniScanCmd)
 
-	sniCmd.Flags().StringVarP(&sniFlagFilename, "filename", "f", "", "domain list filename")
-	sniCmd.Flags().IntVarP(&sniFlagDeep, "deep", "d", 0, "deep subdomain")
-	sniCmd.Flags().IntVar(&sniFlagTimeout, "timeout", 3, "handshake timeout")
-
-	sniCmd.MarkFlagFilename("filename")
-	sniCmd.MarkFlagRequired("filename")
+    sniScanCmd.Flags().StringVarP(&sniFlagCIDR, "cidr", "c", "", "CIDR range to scan")
+    sniScanCmd.Flags().StringVarP(&sniFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
+    sniScanCmd.Flags().StringVarP(&sniFlagOutput, "output", "o", "", "Output file to save results")
+    sniScanCmd.Flags().IntVarP(&sniFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
+    sniScanCmd.Flags().IntVarP(&sniFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
+    sniScanCmd.Flags().IntVarP(&sniFlagCount, "count", "n", 1, "Number of scan attempts per IP")
+    sniScanCmd.Flags().IntVarP(&sniFlagThreads, "threads", "T", 50, "Number of concurrent threads")
 }
 
-func scanSNI(c *queuescanner.Ctx, p *queuescanner.QueueScannerScanParams) {
-	domain := p.Data.(string)
-
-	//
-
-	var conn net.Conn
-	var err error
-
-	dialCount := 0
-	for {
-		dialCount++
-		if dialCount > 3 {
-			return
-		}
-		conn, err = net.DialTimeout("tcp", "93.184.216.34:443", 3*time.Second)
-		if err != nil {
-			if e, ok := err.(net.Error); ok && e.Timeout() {
-				c.LogReplace(p.Name, "-", "Dial Timeout")
-				continue
-			}
-			c.Logf("Dial error: %s", err.Error())
-			return
-		}
-		defer conn.Close()
-		break
-	}
-
-	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName:         domain,
-		InsecureSkipVerify: true,
-	})
-	defer tlsConn.Close()
-
-	ctxHandshake, ctxHandshakeCancel := context.WithTimeout(context.Background(), time.Duration(sniFlagTimeout)*time.Second)
-	defer ctxHandshakeCancel()
-	err = tlsConn.HandshakeContext(ctxHandshake)
-	if err != nil {
-		c.ScanFailed(domain, nil)
-		return
-	}
-	c.ScanSuccess(domain, func() {
-		c.Log(colorG1.Sprint(domain))
-	})
+func sniScanHost(ip string, timeout, count int) bool {
+    pinger, err := ping.NewPinger(ip)
+    if err != nil {
+        return false
+    }
+    pinger.Count = count
+    pinger.Timeout = time.Duration(timeout) * time.Second
+    err = pinger.Run()
+    if err != nil {
+        return false
+    }
+    stats := pinger.Statistics()
+    return stats.PacketsRecv > 0
 }
 
-func runScanSNI(cmd *cobra.Command, args []string) {
-	domainListFile, err := os.Open(sniFlagFilename)
-	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
-	}
-	defer domainListFile.Close()
+func sniScanRun(cmd *cobra.Command, args []string) {
+    var ips []string
 
-	mapDomainList := make(map[string]bool)
-	scanner := bufio.NewScanner(domainListFile)
-	for scanner.Scan() {
-		domain := scanner.Text()
-		if sniFlagDeep > 0 {
-			domainSplit := strings.Split(domain, ".")
-			if len(domainSplit) >= sniFlagDeep {
-				domain = strings.Join(domainSplit[len(domainSplit)-sniFlagDeep:], ".")
-			}
-		}
-		mapDomainList[domain] = true
-	}
+    if sniFlagCIDR != "" {
+        ip, ipnet, err := net.ParseCIDR(sniFlagCIDR)
+        if err != nil {
+            fmt.Println("Invalid CIDR:", err)
+            return
+        }
+        for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+            ips = append(ips, ip.String())
+        }
+    }
 
-	//
+    if sniFlagFile != "" {
+        file, err := os.Open(sniFlagFile)
+        if err != nil {
+            fmt.Println("Error opening file:", err)
+            return
+        }
+        defer file.Close()
 
-	queueScanner := queuescanner.NewQueueScanner(scanFlagThreads, scanSNI)
-	for domain := range mapDomainList {
-		queueScanner.Add(&queuescanner.QueueScannerScanParams{
-			Name: domain,
-			Data: domain,
-		})
-	}
-	queueScanner.Start(nil)
+        scanner := bufio.NewScanner(file)
+        for scanner.Scan() {
+            ips = append(ips, scanner.Text())
+        }
+        if err := scanner.Err(); err != nil {
+            fmt.Println("Error reading file:", err)
+            return
+        }
+    }
+
+    total := len(ips)
+    found := 0
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    sem := make(chan struct{}, sniFlagThreads)
+    green := color.New(color.FgGreen).SprintFunc()
+    results := make([]string, 0)
+
+    for i, ip := range ips {
+        wg.Add(1)
+        sem <- struct{}{}
+        go func(i int, ip string) {
+            defer wg.Done()
+            defer func() { <-sem }()
+            progress := float64(i+1) / float64(total) * 100
+
+            if sniScanHost(ip, sniFlagTimeout, sniFlagCount) {
+                mu.Lock()
+                found++
+                results = append(results, ip)
+                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                mu.Unlock()
+            }
+
+            // Actualizar la línea de progreso
+            mu.Lock()
+            logReplace(ip, found, total, i+1, progress)
+            mu.Unlock()
+
+            if sniFlagDelay > 0 {
+                time.Sleep(time.Duration(sniFlagDelay) * time.Millisecond)
+            }
+        }(i, ip)
+    }
+    wg.Wait()
+
+    // Asegurarse de que la línea final se muestre correctamente
+    logReplace("", found, total, total, 100.00)
+
+    if sniFlagOutput != "" {
+        err := os.WriteFile(sniFlagOutput, []byte(strings.Join(results, "\n")), 0644)
+        if err != nil {
+            fmt.Println("Error writing to output file:", err)
+        }
+    }
+
+    // Agregar un salto de línea al final para evitar el símbolo del sistema
+    fmt.Print("\n")
 }

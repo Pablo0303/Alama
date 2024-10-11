@@ -1,278 +1,141 @@
 package cmd
 
 import (
-	"bufio"
-	"context"
-	"crypto/tls"
-	"fmt"
-	"net"
-	"net/http"
-	"os"
-	"slices"
-	"strings"
-	"time"
+    "bufio"
+    "fmt"
+    "net"
+    "os"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/Pablo0303/Alama/pkg/queuescanner"
-	"github.com/fatih/color"
-	"github.com/spf13/cobra"
+    "github.com/go-ping/ping"
+    "github.com/spf13/cobra"
+    "github.com/fatih/color"
 )
 
-// scanDirectCmd represents the scanDirect command
-var scanDirectCmd = &cobra.Command{
-	Use:   "direct",
-	Short: "Scan using direct connection",
-	Run:   scanDirectRun,
+// directScanCmd represents the directScan command
+var directScanCmd = &cobra.Command{
+    Use:   "direct",
+    Short: "Scan a range of IPs or a list of IPs/hosts directly",
+    Run:   directScanRun,
 }
 
 var (
-	scanDirectFlagFilename   string
-	scanDirectFlagServerList string
-	scanDirectFlagHttps      bool
-	scanDirectFlagTimeout    int
-	scanDirectFlagOutput     string
+    directFlagCIDR    string
+    directFlagFile    string
+    directFlagOutput  string
+    directFlagTimeout int
+    directFlagDelay   int
+    directFlagCount   int
+    directFlagThreads int
 )
 
 func init() {
-	scanCmd.AddCommand(scanDirectCmd)
+    rootCmd.AddCommand(directScanCmd)
 
-	scanDirectCmd.Flags().StringVarP(&scanDirectFlagFilename, "filename", "f", "", "domain list filename")
-	scanDirectCmd.Flags().StringVarP(&scanDirectFlagServerList, "server-list", "s", "all", "server list")
-	scanDirectCmd.Flags().BoolVar(&scanDirectFlagHttps, "https", false, "use https")
-	scanDirectCmd.Flags().IntVar(&scanDirectFlagTimeout, "timeout", 3, "connect timeout")
-	scanDirectCmd.Flags().StringVarP(&scanDirectFlagOutput, "output", "o", "", "output result")
-
-	scanDirectCmd.MarkFlagFilename("filename")
-	scanDirectCmd.MarkFlagRequired("filename")
+    directScanCmd.Flags().StringVarP(&directFlagCIDR, "cidr", "c", "", "CIDR range to scan")
+    directScanCmd.Flags().StringVarP(&directFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
+    directScanCmd.Flags().StringVarP(&directFlagOutput, "output", "o", "", "Output file to save results")
+    directScanCmd.Flags().IntVarP(&directFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
+    directScanCmd.Flags().IntVarP(&directFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
+    directScanCmd.Flags().IntVarP(&directFlagCount, "count", "n", 1, "Number of scan attempts per IP")
+    directScanCmd.Flags().IntVarP(&directFlagThreads, "threads", "T", 50, "Number of concurrent threads")
 }
 
-type scanDirectRequest struct {
-	Domain     string
-	Https      bool
-	ServerList []string
+func directScanHost(ip string, timeout, count int) bool {
+    pinger, err := ping.NewPinger(ip)
+    if err != nil {
+        return false
+    }
+    pinger.Count = count
+    pinger.Timeout = time.Duration(timeout) * time.Second
+    err = pinger.Run()
+    if err != nil {
+        return false
+    }
+    stats := pinger.Statistics()
+    return stats.PacketsRecv > 0
 }
 
-type scanDirectResponse struct {
-	Color      *color.Color
-	Request    *scanDirectRequest
-	NetIPList  []net.IP
-	StatusCode int
-	Server     string
-	Location   string
-}
+func directScanRun(cmd *cobra.Command, args []string) {
+    var ips []string
 
-var httpClient = &http.Client{
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-	},
-	Timeout: 10 * time.Second,
-}
+    if directFlagCIDR != "" {
+        ip, ipnet, err := net.ParseCIDR(directFlagCIDR)
+        if err != nil {
+            fmt.Println("Invalid CIDR:", err)
+            return
+        }
+        for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+            ips = append(ips, ip.String())
+        }
+    }
 
-var ctxBackground = context.Background()
+    if directFlagFile != "" {
+        file, err := os.Open(directFlagFile)
+        if err != nil {
+            fmt.Println("Error opening file:", err)
+            return
+        }
+        defer file.Close()
 
-func scanDirect(c *queuescanner.Ctx, p *queuescanner.QueueScannerScanParams) {
-	req := p.Data.(*scanDirectRequest)
+        scanner := bufio.NewScanner(file)
+        for scanner.Scan() {
+            ips = append(ips, scanner.Text())
+        }
+        if err := scanner.Err(); err != nil {
+            fmt.Println("Error reading file:", err)
+            return
+        }
+    }
 
-	ctxTimeout, cancel := context.WithTimeout(ctxBackground, 3*time.Second)
-	defer cancel()
-	netIPList, err := net.DefaultResolver.LookupIP(ctxTimeout, "ip4", req.Domain)
-	if err != nil {
-		return
-	}
-	ip := netIPList[0].String()
+    total := len(ips)
+    found := 0
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    sem := make(chan struct{}, directFlagThreads)
+    green := color.New(color.FgGreen).SprintFunc()
+    results := make([]string, 0)
 
-	httpScheme := "http"
-	if req.Https {
-		httpScheme = "https"
-	}
+    for i, ip := range ips {
+        wg.Add(1)
+        sem <- struct{}{}
+        go func(i int, ip string) {
+            defer wg.Done()
+            defer func() { <-sem }()
+            progress := float64(i+1) / float64(total) * 100
 
-	httpReq, err := http.NewRequest("HEAD", fmt.Sprintf("%s://%s", httpScheme, req.Domain), nil)
-	if err != nil {
-		return
-	}
+            if directScanHost(ip, directFlagTimeout, directFlagCount) {
+                mu.Lock()
+                found++
+                results = append(results, ip)
+                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                mu.Unlock()
+            }
 
-	httpRes, err := httpClient.Do(httpReq)
-	if err != nil {
-		return
-	}
+            // Actualizar la línea de progreso
+            mu.Lock()
+            logReplace(ip, found, total, i+1, progress)
+            mu.Unlock()
 
-	hServer := httpRes.Header.Get("Server")
-	hServerLower := strings.ToLower(hServer)
-	hCfRay := httpRes.Header.Get("CF-RAY")
-	hLocation := httpRes.Header.Get("Location")
+            if directFlagDelay > 0 {
+                time.Sleep(time.Duration(directFlagDelay) * time.Millisecond)
+            }
+        }(i, ip)
+    }
+    wg.Wait()
 
-	resColor := color.New()
+    // Asegurarse de que la línea final se muestre correctamente
+    logReplace("", found, total, total, 100.00)
 
-	isHiddenCloudflare := slices.Contains(req.ServerList, "cloudflare") && hCfRay != "" && hServerLower != "cloudflare"
+    if directFlagOutput != "" {
+        err := os.WriteFile(directFlagOutput, []byte(strings.Join(results, "\n")), 0644)
+        if err != nil {
+            fmt.Println("Error writing to output file:", err)
+        }
+    }
 
-	if slices.Contains(req.ServerList, hServerLower) || isHiddenCloudflare {
-		if isHiddenCloudflare {
-			resColor = colorG1
-			hServer = fmt.Sprintf("%s (cf)", hServer)
-		} else {
-			switch hServerLower {
-			case "cloudflare":
-				resColor = colorG1
-			case "akamaighost":
-				resColor = colorY1
-			case "cloudfront":
-				resColor = colorC1
-			default:
-				resColor = colorW1
-			}
-			if len(req.ServerList) == 1 {
-				resColor = colorG1
-			}
-		}
-		res := &scanDirectResponse{
-			Color:      resColor,
-			Request:    req,
-			NetIPList:  netIPList,
-			StatusCode: httpRes.StatusCode,
-			Server:     hServer,
-			Location:   hLocation,
-		}
-		c.ScanSuccess(res, nil)
-	}
-
-	if hLocation != "" {
-		hLocation = fmt.Sprintf(" -> %s", hLocation)
-	}
-
-	s := fmt.Sprintf(
-		"%-15s  %-3d  %-16s    %s%s",
-		ip,
-		httpRes.StatusCode,
-		hServer,
-		req.Domain,
-		hLocation,
-	)
-
-	s = resColor.Sprint(s)
-
-	c.Log(s)
-}
-
-func scanDirectRun(cmd *cobra.Command, args []string) {
-	domainList := make(map[string]bool)
-
-	domainListFile, err := os.Open(scanDirectFlagFilename)
-	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
-	}
-	defer domainListFile.Close()
-
-	scanner := bufio.NewScanner(domainListFile)
-	for scanner.Scan() {
-		domain := scanner.Text()
-		domainList[domain] = true
-	}
-
-	var serverList []string
-
-	scanDirectFlagServerListLower := strings.ToLower(scanDirectFlagServerList)
-
-	if scanDirectFlagServerListLower == "all" {
-		serverList = []string{
-			"cloudflare",
-			"cloudfront",
-			"akamaighost",
-		}
-	} else {
-		serverList = strings.Split(scanDirectFlagServerListLower, ",")
-	}
-
-	//
-
-	queueScanner := queuescanner.NewQueueScanner(scanFlagThreads, scanDirect)
-	for domain := range domainList {
-		queueScanner.Add(&queuescanner.QueueScannerScanParams{
-			Name: domain,
-			Data: &scanDirectRequest{
-				Domain:     domain,
-				Https:      scanDirectFlagHttps,
-				ServerList: serverList,
-			},
-		})
-	}
-	queueScanner.Start(func(c *queuescanner.Ctx) {
-		if len(c.ScanSuccessList) == 0 {
-			return
-		}
-
-		c.Log("")
-
-		mapServerList := make(map[string][]*scanDirectResponse)
-
-		for _, data := range c.ScanSuccessList {
-			res, ok := data.(*scanDirectResponse)
-			if !ok {
-				continue
-			}
-
-			mapServerList[res.Server] = append(mapServerList[res.Server], res)
-		}
-
-		domainList := make([]string, 0)
-		ipList := make([]string, 0)
-
-		for server, resList := range mapServerList {
-			if len(resList) == 0 {
-				continue
-			}
-
-			var resColor *color.Color
-
-			mapIPList := make(map[string]bool)
-			mapDomainList := make(map[string]bool)
-
-			for _, res := range resList {
-				if resColor == nil {
-					resColor = res.Color
-				}
-
-				for _, netIP := range res.NetIPList {
-					ip := netIP.String()
-					mapIPList[ip] = true
-				}
-
-				mapDomainList[res.Request.Domain] = true
-			}
-
-			c.Log(resColor.Sprintf("\n%s\n", server))
-
-			domainList = append(domainList, fmt.Sprintf("# %s", server))
-			for doamin := range mapDomainList {
-				domainList = append(domainList, doamin)
-				c.Log(resColor.Sprint(doamin))
-			}
-			domainList = append(domainList, "")
-			c.Log("")
-
-			ipList = append(ipList, fmt.Sprintf("# %s", server))
-			for ip := range mapIPList {
-				ipList = append(ipList, ip)
-				c.Log(resColor.Sprint(ip))
-			}
-			ipList = append(ipList, "")
-			c.Log("")
-		}
-
-		outputList := make([]string, 0)
-		outputList = append(outputList, domainList...)
-		outputList = append(outputList, ipList...)
-
-		if scanDirectFlagOutput != "" {
-			err := os.WriteFile(scanDirectFlagOutput, []byte(strings.Join(outputList, "\n")), 0644)
-			if err != nil {
-				fmt.Println(err.Error())
-				os.Exit(1)
-			}
-		}
-	})
+    // Agregar un salto de línea al final para evitar el símbolo del sistema
+    fmt.Print("\n")
 }
