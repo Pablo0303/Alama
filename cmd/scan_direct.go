@@ -4,6 +4,7 @@ import (
     "bufio"
     "fmt"
     "net"
+    "net/http"
     "os"
     "strings"
     "sync"
@@ -34,28 +35,43 @@ var (
 func init() {
     rootCmd.AddCommand(directScanCmd)
 
-    directScanCmd.Flags().StringVarP(&directFlagCIDR, "cidr", "c", "", "CIDR range to scan")
-    directScanCmd.Flags().StringVarP(&directFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
-    directScanCmd.Flags().StringVarP(&directFlagOutput, "output", "o", "", "Output file to save results")
-    directScanCmd.Flags().IntVarP(&directFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
-    directScanCmd.Flags().IntVarP(&directFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
-    directScanCmd.Flags().IntVarP(&directFlagCount, "count", "n", 1, "Number of scan attempts per IP")
-    directScanCmd.Flags().IntVarP(&directFlagThreads, "threads", "T", 50, "Number of concurrent threads")
+    directScanCmd.Flags().StringVarP(&directFlagCIDR, "cidr", "c", "", "Rango CIDR para escanear")
+    directScanCmd.Flags().StringVarP(&directFlagFile, "file", "f", "", "Archivo que contiene la lista de IPs/hosts para escanear")
+    directScanCmd.Flags().StringVarP(&directFlagOutput, "output", "o", "", "Archivo de salida para guardar los resultados")
+    directScanCmd.Flags().IntVarP(&directFlagTimeout, "timeout", "t", 1, "Tiempo de espera del escaneo en segundos")
+    directScanCmd.Flags().IntVarP(&directFlagDelay, "delay", "d", 250, "Retraso entre escaneos en milisegundos")
+    directScanCmd.Flags().IntVarP(&directFlagCount, "count", "n", 1, "Número de intentos de escaneo por IP")
+    directScanCmd.Flags().IntVarP(&directFlagThreads, "threads", "T", 50, "Número de hilos concurrentes")
 }
 
-func directScanHost(ip string, timeout, count int) bool {
+func directScanHost(ip string, timeout, count int) (bool, string, string) {
     pinger, err := ping.NewPinger(ip)
     if err != nil {
-        return false
+        return false, "", ""
     }
     pinger.Count = count
     pinger.Timeout = time.Duration(timeout) * time.Second
     err = pinger.Run()
     if err != nil {
-        return false
+        return false, "", ""
     }
     stats := pinger.Statistics()
-    return stats.PacketsRecv > 0
+    if stats.PacketsRecv > 0 {
+        // Realizar una solicitud HTTP para obtener la información del servidor y el código de estado
+        url := fmt.Sprintf("http://%s", ip)
+        client := &http.Client{
+            Timeout: time.Duration(timeout) * time.Second,
+        }
+        resp, err := client.Get(url)
+        if err != nil {
+            return true, "", ""
+        }
+        defer resp.Body.Close()
+        server := resp.Header.Get("Server")
+        status := resp.Status
+        return true, server, status
+    }
+    return false, "", ""
 }
 
 func directScanRun(cmd *cobra.Command, args []string) {
@@ -64,7 +80,7 @@ func directScanRun(cmd *cobra.Command, args []string) {
     if directFlagCIDR != "" {
         ip, ipnet, err := net.ParseCIDR(directFlagCIDR)
         if err != nil {
-            fmt.Println("Invalid CIDR:", err)
+            fmt.Println("Rango CIDR inválido:", err)
             return
         }
         for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
@@ -75,7 +91,7 @@ func directScanRun(cmd *cobra.Command, args []string) {
     if directFlagFile != "" {
         file, err := os.Open(directFlagFile)
         if err != nil {
-            fmt.Println("Error opening file:", err)
+            fmt.Println("Error al abrir el archivo:", err)
             return
         }
         defer file.Close()
@@ -85,7 +101,7 @@ func directScanRun(cmd *cobra.Command, args []string) {
             ips = append(ips, scanner.Text())
         }
         if err := scanner.Err(); err != nil {
-            fmt.Println("Error reading file:", err)
+            fmt.Println("Error al leer el archivo:", err)
             return
         }
     }
@@ -106,11 +122,13 @@ func directScanRun(cmd *cobra.Command, args []string) {
             defer func() { <-sem }()
             progress := float64(i+1) / float64(total) * 100
 
-            if directScanHost(ip, directFlagTimeout, directFlagCount) {
+            success, server, status := directScanHost(ip, directFlagTimeout, directFlagCount)
+            if success {
                 mu.Lock()
                 found++
-                results = append(results, ip)
-                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                result := fmt.Sprintf("%s - %s - %s", ip, server, status)
+                results = append(results, result)
+                fmt.Printf("\n%s\n", green(result)) // Mostrar IP, servidor y estado en color verde en una línea independiente
                 mu.Unlock()
             }
 
@@ -132,7 +150,7 @@ func directScanRun(cmd *cobra.Command, args []string) {
     if directFlagOutput != "" {
         err := os.WriteFile(directFlagOutput, []byte(strings.Join(results, "\n")), 0644)
         if err != nil {
-            fmt.Println("Error writing to output file:", err)
+            fmt.Println("Error al escribir en el archivo de salida:", err)
         }
     }
 

@@ -1,88 +1,71 @@
 package cmd
 
 import (
-    "github.com/spf13/cobra"
-    "github.com/spf13/viper"
-    "os"
+	"fmt"
+	"os"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
+var cfgFile string
+
+// rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-    Use:   "Alama",
-    Short: "Alama es una herramienta de escaneo de redes",
-    Long: `Alama es una herramienta versátil de escaneo de redes que soporta varios tipos de escaneos.
-    
-Módulos disponibles:
-  - scan: Escaneo general de IPs/hosts usando ping.
-  - cdnssl: Escaneo de SSL de CDN.
-  - direct: Escaneo directo de IPs/hosts.
-  - proxy: Escaneo de proxies activos.
-  - sni: Escaneo de Server Name Indication (SNI).
-  - udp: Escaneo de conexiones UDP activas.
-
-Opciones:
-  -c, --cidr string       Rango CIDR para escanear
-  -f, --file string       Archivo que contiene la lista de IPs/hosts para escanear
-  -o, --output string     Archivo de salida para guardar los resultados
-  -t, --timeout int       Tiempo de espera del escaneo en segundos (por defecto 1)
-  -d, --delay int         Retraso entre escaneos en milisegundos (por defecto 250)
-  -n, --count int         Número de intentos de escaneo por IP (por defecto 1)
-  -T, --threads int       Número de hilos concurrentes (por defecto 50)
-  -x, --proxy string      Proxy y puerto a usar (ej., 192.168.1.1:8080)
-
-Ejemplos de uso:
-  - Escaneo general de IPs/hosts:
-    ./Alama scan -c 192.168.1.0/24
-    ./Alama scan -f ips.txt
-    ./Alama scan --target vps.example.com
-
-  - Escaneo de SSL de CDN:
-    ./Alama cdnssl -c 192.168.1.0/24
-    ./Alama cdnssl -f ips.txt
-    ./Alama cdnssl --target vps.example.com
-    ./Alama cdnssl --proxy-filename cf.txt --target ws.example.com
-
-  - Escaneo directo de IPs/hosts:
-    ./Alama direct -c 192.168.1.0/24
-    ./Alama direct -f ips.txt
-    ./Alama direct --target vps.example.com
-
-  - Escaneo de proxies:
-    ./Alama proxy -c 192.168.1.0/24
-    ./Alama proxy -f ips.txt
-    ./Alama proxy --target vps.example.com
-    ./Alama proxy --http -f personal.txt -x 192.168.1.1:8080
-
-  - Escaneo de SNI:
-    ./Alama sni -c 192.168.1.0/24
-    ./Alama sni -f ips.txt
-    ./Alama sni --target vps.example.com
-
-  - Escaneo de UDP:
-    ./Alama udp -c 192.168.1.0/24
-    ./Alama udp -f ips.txt
-    ./Alama udp --target vps.example.com
-`,
+	Use:   "Alama",
+	Short: "Esta herramienta esta hecha para el conocimiento",
 }
 
+// Execute adds all child commands to the root command and sets flags appropriately.
+// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-    if err := rootCmd.Execute(); err != nil {
-        os.Exit(1)
-    }
+	cobra.CheckErr(rootCmd.Execute())
 }
 
 func init() {
-    cobra.OnInitialize(initConfig)
-    rootCmd.PersistentFlags().StringP("config", "c", "", "archivo de configuración (por defecto es $HOME/.alama.yaml)")
-    viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
+	cobra.OnInitialize(initConfig)
 
-    rootCmd.AddCommand(scanCmd)
-    rootCmd.AddCommand(cdnSslScanCmd)
-    rootCmd.AddCommand(directScanCmd)
-    rootCmd.AddCommand(proxyScanCmd)
-    rootCmd.AddCommand(sniScanCmd)
-    rootCmd.AddCommand(udpScanCmd)
+	// Here you will define your flags and configuration settings.
+	// Cobra supports persistent flags, which, if defined here,
+	// will be global for your application.
+
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.Alama.yaml)")
+
+	// Cobra also supports local flags, which will only run
+	// when this action is called directly.
+	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
+var (
+	colorD1 = color.New()
+	colorB1 = color.New(color.FgHiBlack)
+	colorW1 = color.New(color.FgWhite, color.Bold)
+	colorG1 = color.New(color.FgGreen, color.Bold)
+	colorC1 = color.New(color.FgCyan, color.Bold)
+	colorY1 = color.New(color.FgYellow, color.Bold)
+)
+
+// initConfig reads in config file and ENV variables if set.
 func initConfig() {
-    viper.AutomaticEnv()
+	if cfgFile != "" {
+		// Use config file from the flag.
+		viper.SetConfigFile(cfgFile)
+	} else {
+		// Find home directory.
+		home, err := os.UserHomeDir()
+		cobra.CheckErr(err)
+
+		// Search config in home directory with name ".Alama" (without extension).
+		viper.AddConfigPath(home)
+		viper.SetConfigType("yaml")
+		viper.SetConfigName(".Alama")
+	}
+
+	viper.AutomaticEnv() // read in environment variables that match
+
+	// If a config file is found, read it in.
+	if err := viper.ReadInConfig(); err == nil {
+		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
+	}
 }

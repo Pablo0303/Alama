@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/go-ping/ping"
 	"github.com/spf13/cobra"
+	"github.com/fatih/color"
 )
 
 // pingScanCmd represents the pingScan command
@@ -34,24 +34,26 @@ var (
 func init() {
 	rootCmd.AddCommand(pingScanCmd)
 
-	pingScanCmd.Flags().StringVarP(&pingFlagCIDR, "cidr", "c", "", "CIDR range to ping")
-	pingScanCmd.Flags().StringVarP(&pingFlagFile, "file", "f", "", "File containing list of IPs/hosts to ping")
-	pingScanCmd.Flags().StringVarP(&pingFlagOutput, "output", "o", "", "Output file to save results")
-	pingScanCmd.Flags().IntVarP(&pingFlagTimeout, "timeout", "t", 1, "Ping timeout in seconds")
-	pingScanCmd.Flags().IntVarP(&pingFlagDelay, "delay", "d", 100, "Delay between pings in milliseconds")
-	pingScanCmd.Flags().IntVarP(&pingFlagCount, "count", "n", 3, "Number of ping attempts per IP")
-	pingScanCmd.Flags().IntVarP(&pingFlagThreads, "threads", "T", 10, "Number of concurrent threads")
+	pingScanCmd.Flags().StringVarP(&pingFlagCIDR, "cidr", "c", "", "Rango CIDR para escanear")
+	pingScanCmd.Flags().StringVarP(&pingFlagFile, "file", "f", "", "Archivo que contiene la lista de IPs/hosts para escanear")
+	pingScanCmd.Flags().StringVarP(&pingFlagOutput, "output", "o", "", "Archivo de salida para guardar los resultados")
+	pingScanCmd.Flags().IntVarP(&pingFlagTimeout, "timeout", "t", 1, "Tiempo de espera del escaneo en segundos")
+	pingScanCmd.Flags().IntVarP(&pingFlagDelay, "delay", "d", 250, "Retraso entre escaneos en milisegundos")
+	pingScanCmd.Flags().IntVarP(&pingFlagCount, "count", "n", 1, "Número de intentos de escaneo por IP")
+	pingScanCmd.Flags().IntVarP(&pingFlagThreads, "threads", "T", 50, "Número de hilos concurrentes")
 }
 
-func pingHost(ip string, timeout, count int) bool {
+func pingScanHost(ip string, timeout, count int) bool {
 	pinger, err := ping.NewPinger(ip)
 	if err != nil {
+		fmt.Println("Error al crear el pinger:", err)
 		return false
 	}
 	pinger.Count = count
 	pinger.Timeout = time.Duration(timeout) * time.Second
 	err = pinger.Run()
 	if err != nil {
+		fmt.Println("Error al ejecutar el pinger:", err)
 		return false
 	}
 	stats := pinger.Statistics()
@@ -64,10 +66,10 @@ func pingScanRun(cmd *cobra.Command, args []string) {
 	if pingFlagCIDR != "" {
 		ip, ipnet, err := net.ParseCIDR(pingFlagCIDR)
 		if err != nil {
-			fmt.Println("Invalid CIDR:", err)
+			fmt.Println("Rango CIDR inválido:", err)
 			return
 		}
-		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {
+		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
 			ips = append(ips, ip.String())
 		}
 	}
@@ -75,7 +77,7 @@ func pingScanRun(cmd *cobra.Command, args []string) {
 	if pingFlagFile != "" {
 		file, err := os.Open(pingFlagFile)
 		if err != nil {
-			fmt.Println("Error opening file:", err)
+			fmt.Println("Error al abrir el archivo:", err)
 			return
 		}
 		defer file.Close()
@@ -85,17 +87,18 @@ func pingScanRun(cmd *cobra.Command, args []string) {
 			ips = append(ips, scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
-			fmt.Println("Error reading file:", err)
+			fmt.Println("Error al leer el archivo:", err)
 			return
 		}
 	}
 
 	total := len(ips)
-	results := make([]string, 0)
-	successColor := color.New(color.FgGreen).SprintFunc()
+	found := 0
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pingFlagThreads)
+	green := color.New(color.FgGreen).SprintFunc()
+	results := make([]string, 0)
 
 	for i, ip := range ips {
 		wg.Add(1)
@@ -104,36 +107,37 @@ func pingScanRun(cmd *cobra.Command, args []string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			progress := float64(i+1) / float64(total) * 100
-			fmt.Printf("\rScanning: %d/%d (%.2f%%)", i+1, total, progress)
 
-			if pingHost(ip, pingFlagTimeout, pingFlagCount) {
-				result := fmt.Sprintf("Ping successful: %s", ip)
+			if pingScanHost(ip, pingFlagTimeout, pingFlagCount) {
 				mu.Lock()
-				fmt.Println()
-				fmt.Println(successColor(result))
-				results = append(results, result)
+				found++
+				results = append(results, ip)
+				fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
 				mu.Unlock()
 			}
-			time.Sleep(time.Duration(pingFlagDelay) * time.Millisecond)
+
+			// Actualizar la línea de progreso
+			mu.Lock()
+			logReplace(ip, found, total, i+1, progress)
+			mu.Unlock()
+
+			if pingFlagDelay > 0 {
+				time.Sleep(time.Duration(pingFlagDelay) * time.Millisecond)
+			}
 		}(i, ip)
 	}
 	wg.Wait()
 
-	fmt.Println()
+	// Asegurarse de que la línea final se muestre correctamente
+	logReplace("", found, total, total, 100.00)
 
 	if pingFlagOutput != "" {
 		err := os.WriteFile(pingFlagOutput, []byte(strings.Join(results, "\n")), 0644)
 		if err != nil {
-			fmt.Println("Error writing to output file:", err)
+			fmt.Println("Error al escribir en el archivo de salida:", err)
 		}
 	}
-}
 
-func inc(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
-		}
-	}
+	// Agregar un salto de línea al final para evitar el símbolo del sistema
+	fmt.Print("\n")
 }

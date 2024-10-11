@@ -4,6 +4,7 @@ import (
     "bufio"
     "fmt"
     "net"
+    "net/http"
     "os"
     "strings"
     "sync"
@@ -33,19 +34,19 @@ var (
 func init() {
     rootCmd.AddCommand(udpScanCmd)
 
-    udpScanCmd.Flags().StringVarP(&udpFlagCIDR, "cidr", "c", "", "CIDR range to scan")
-    udpScanCmd.Flags().StringVarP(&udpFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
-    udpScanCmd.Flags().StringVarP(&udpFlagOutput, "output", "o", "", "Output file to save results")
-    udpScanCmd.Flags().IntVarP(&udpFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
-    udpScanCmd.Flags().IntVarP(&udpFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
-    udpScanCmd.Flags().IntVarP(&udpFlagCount, "count", "n", 1, "Number of scan attempts per IP")
-    udpScanCmd.Flags().IntVarP(&udpFlagThreads, "threads", "T", 50, "Number of concurrent threads")
+    udpScanCmd.Flags().StringVarP(&udpFlagCIDR, "cidr", "c", "", "Rango CIDR para escanear")
+    udpScanCmd.Flags().StringVarP(&udpFlagFile, "file", "f", "", "Archivo que contiene la lista de IPs/hosts para escanear")
+    udpScanCmd.Flags().StringVarP(&udpFlagOutput, "output", "o", "", "Archivo de salida para guardar los resultados")
+    udpScanCmd.Flags().IntVarP(&udpFlagTimeout, "timeout", "t", 1, "Tiempo de espera del escaneo en segundos")
+    udpScanCmd.Flags().IntVarP(&udpFlagDelay, "delay", "d", 250, "Retraso entre escaneos en milisegundos")
+    udpScanCmd.Flags().IntVarP(&udpFlagCount, "count", "n", 1, "Número de intentos de escaneo por IP")
+    udpScanCmd.Flags().IntVarP(&udpFlagThreads, "threads", "T", 50, "Número de hilos concurrentes")
 }
 
-func udpScanHost(ip string, timeout, count int) bool {
+func udpScanHost(ip string, timeout, count int) (bool, string, string) {
     conn, err := net.Dial("udp", fmt.Sprintf("%s:53", ip))
     if err != nil {
-        return false
+        return false, "", ""
     }
     defer conn.Close()
 
@@ -53,17 +54,29 @@ func udpScanHost(ip string, timeout, count int) bool {
     for i := 0; i < count; i++ {
         _, err := conn.Write(message)
         if err != nil {
-            return false
+            return false, "", ""
         }
 
         conn.SetReadDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
         buffer := make([]byte, 1024)
         _, err = conn.Read(buffer)
         if err == nil {
-            return true
+            // Realizar una solicitud HTTP para obtener la información del servidor y el código de estado
+            url := fmt.Sprintf("http://%s", ip)
+            client := &http.Client{
+                Timeout: time.Duration(timeout) * time.Second,
+            }
+            resp, err := client.Get(url)
+            if err != nil {
+                return true, "", ""
+            }
+            defer resp.Body.Close()
+            server := resp.Header.Get("Server")
+            status := resp.Status
+            return true, server, status
         }
     }
-    return false
+    return false, "", ""
 }
 
 func udpScanRun(cmd *cobra.Command, args []string) {
@@ -72,7 +85,7 @@ func udpScanRun(cmd *cobra.Command, args []string) {
     if udpFlagCIDR != "" {
         ip, ipnet, err := net.ParseCIDR(udpFlagCIDR)
         if err != nil {
-            fmt.Println("Invalid CIDR:", err)
+            fmt.Println("Rango CIDR inválido:", err)
             return
         }
         for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
@@ -83,7 +96,7 @@ func udpScanRun(cmd *cobra.Command, args []string) {
     if udpFlagFile != "" {
         file, err := os.Open(udpFlagFile)
         if err != nil {
-            fmt.Println("Error opening file:", err)
+            fmt.Println("Error al abrir el archivo:", err)
             return
         }
         defer file.Close()
@@ -93,7 +106,7 @@ func udpScanRun(cmd *cobra.Command, args []string) {
             ips = append(ips, scanner.Text())
         }
         if err := scanner.Err(); err != nil {
-            fmt.Println("Error reading file:", err)
+            fmt.Println("Error al leer el archivo:", err)
             return
         }
     }
@@ -114,11 +127,13 @@ func udpScanRun(cmd *cobra.Command, args []string) {
             defer func() { <-sem }()
             progress := float64(i+1) / float64(total) * 100
 
-            if udpScanHost(ip, udpFlagTimeout, udpFlagCount) {
+            success, server, status := udpScanHost(ip, udpFlagTimeout, udpFlagCount)
+            if success {
                 mu.Lock()
                 found++
-                results = append(results, ip)
-                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                result := fmt.Sprintf("%s - %s - %s", ip, server, status)
+                results = append(results, result)
+                fmt.Printf("\n%s\n", green(result)) // Mostrar IP, servidor y estado en color verde en una línea independiente
                 mu.Unlock()
             }
 
@@ -140,7 +155,7 @@ func udpScanRun(cmd *cobra.Command, args []string) {
     if udpFlagOutput != "" {
         err := os.WriteFile(udpFlagOutput, []byte(strings.Join(results, "\n")), 0644)
         if err != nil {
-            fmt.Println("Error writing to output file:", err)
+            fmt.Println("Error al escribir en el archivo de salida:", err)
         }
     }
 

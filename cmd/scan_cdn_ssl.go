@@ -4,6 +4,7 @@ import (
     "bufio"
     "fmt"
     "net"
+    "net/http"
     "os"
     "strings"
     "sync"
@@ -34,28 +35,43 @@ var (
 func init() {
     rootCmd.AddCommand(cdnSslScanCmd)
 
-    cdnSslScanCmd.Flags().StringVarP(&cdnSslFlagCIDR, "cidr", "c", "", "CIDR range to scan")
-    cdnSslScanCmd.Flags().StringVarP(&cdnSslFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
-    cdnSslScanCmd.Flags().StringVarP(&cdnSslFlagOutput, "output", "o", "", "Output file to save results")
-    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
-    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
-    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagCount, "count", "n", 1, "Number of scan attempts per IP")
-    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagThreads, "threads", "T", 50, "Number of concurrent threads")
+    cdnSslScanCmd.Flags().StringVarP(&cdnSslFlagCIDR, "cidr", "c", "", "Rango CIDR para escanear")
+    cdnSslScanCmd.Flags().StringVarP(&cdnSslFlagFile, "file", "f", "", "Archivo que contiene la lista de IPs/hosts para escanear")
+    cdnSslScanCmd.Flags().StringVarP(&cdnSslFlagOutput, "output", "o", "", "Archivo de salida para guardar los resultados")
+    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagTimeout, "timeout", "t", 1, "Tiempo de espera del escaneo en segundos")
+    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagDelay, "delay", "d", 250, "Retraso entre escaneos en milisegundos")
+    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagCount, "count", "n", 1, "Número de intentos de escaneo por IP")
+    cdnSslScanCmd.Flags().IntVarP(&cdnSslFlagThreads, "threads", "T", 50, "Número de hilos concurrentes")
 }
 
-func cdnSslScanHost(ip string, timeout, count int) bool {
+func cdnSslScanHost(ip string, timeout, count int) (bool, string, string) {
     pinger, err := ping.NewPinger(ip)
     if err != nil {
-        return false
+        return false, "", ""
     }
     pinger.Count = count
     pinger.Timeout = time.Duration(timeout) * time.Second
     err = pinger.Run()
     if err != nil {
-        return false
+        return false, "", ""
     }
     stats := pinger.Statistics()
-    return stats.PacketsRecv > 0
+    if stats.PacketsRecv > 0 {
+        // Realizar una solicitud HTTP para obtener la información del servidor y el código de estado
+        url := fmt.Sprintf("http://%s", ip)
+        client := &http.Client{
+            Timeout: time.Duration(timeout) * time.Second,
+        }
+        resp, err := client.Get(url)
+        if err != nil {
+            return true, "", ""
+        }
+        defer resp.Body.Close()
+        server := resp.Header.Get("Server")
+        status := resp.Status
+        return true, server, status
+    }
+    return false, "", ""
 }
 
 func cdnSslScanRun(cmd *cobra.Command, args []string) {
@@ -64,7 +80,7 @@ func cdnSslScanRun(cmd *cobra.Command, args []string) {
     if cdnSslFlagCIDR != "" {
         ip, ipnet, err := net.ParseCIDR(cdnSslFlagCIDR)
         if err != nil {
-            fmt.Println("Invalid CIDR:", err)
+            fmt.Println("Rango CIDR inválido:", err)
             return
         }
         for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
@@ -75,7 +91,7 @@ func cdnSslScanRun(cmd *cobra.Command, args []string) {
     if cdnSslFlagFile != "" {
         file, err := os.Open(cdnSslFlagFile)
         if err != nil {
-            fmt.Println("Error opening file:", err)
+            fmt.Println("Error al abrir el archivo:", err)
             return
         }
         defer file.Close()
@@ -85,7 +101,7 @@ func cdnSslScanRun(cmd *cobra.Command, args []string) {
             ips = append(ips, scanner.Text())
         }
         if err := scanner.Err(); err != nil {
-            fmt.Println("Error reading file:", err)
+            fmt.Println("Error al leer el archivo:", err)
             return
         }
     }
@@ -106,11 +122,13 @@ func cdnSslScanRun(cmd *cobra.Command, args []string) {
             defer func() { <-sem }()
             progress := float64(i+1) / float64(total) * 100
 
-            if cdnSslScanHost(ip, cdnSslFlagTimeout, cdnSslFlagCount) {
+            success, server, status := cdnSslScanHost(ip, cdnSslFlagTimeout, cdnSslFlagCount)
+            if success {
                 mu.Lock()
                 found++
-                results = append(results, ip)
-                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                result := fmt.Sprintf("%s - %s - %s", ip, server, status)
+                results = append(results, result)
+                fmt.Printf("\n%s\n", green(result)) // Mostrar IP, servidor y estado en color verde en una línea independiente
                 mu.Unlock()
             }
 
@@ -132,7 +150,7 @@ func cdnSslScanRun(cmd *cobra.Command, args []string) {
     if cdnSslFlagOutput != "" {
         err := os.WriteFile(cdnSslFlagOutput, []byte(strings.Join(results, "\n")), 0644)
         if err != nil {
-            fmt.Println("Error writing to output file:", err)
+            fmt.Println("Error al escribir en el archivo de salida:", err)
         }
     }
 

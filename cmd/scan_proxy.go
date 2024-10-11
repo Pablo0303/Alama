@@ -4,6 +4,8 @@ import (
     "bufio"
     "fmt"
     "net"
+    "net/http"
+    "net/url"
     "os"
     "strings"
     "sync"
@@ -35,30 +37,53 @@ var (
 func init() {
     rootCmd.AddCommand(proxyScanCmd)
 
-    proxyScanCmd.Flags().StringVarP(&proxyFlagCIDR, "cidr", "c", "", "CIDR range to scan")
-    proxyScanCmd.Flags().StringVarP(&proxyFlagFile, "file", "f", "", "File containing list of IPs/hosts to scan")
-    proxyScanCmd.Flags().StringVarP(&proxyFlagOutput, "output", "o", "", "Output file to save results")
-    proxyScanCmd.Flags().IntVarP(&proxyFlagTimeout, "timeout", "t", 1, "Scan timeout in seconds")
-    proxyScanCmd.Flags().IntVarP(&proxyFlagDelay, "delay", "d", 250, "Delay between scans in milliseconds")
-    proxyScanCmd.Flags().IntVarP(&proxyFlagCount, "count", "n", 1, "Number of scan attempts per IP")
-    proxyScanCmd.Flags().IntVarP(&proxyFlagThreads, "threads", "T", 50, "Number of concurrent threads")
-    proxyScanCmd.Flags().StringVarP(&proxyFlagProxy, "proxy", "x", "", "Proxy and port to use (e.g., 192.168.1.1:8080)")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagCIDR, "cidr", "c", "", "Rango CIDR para escanear")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagFile, "file", "f", "", "Archivo que contiene la lista de IPs/hosts para escanear")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagOutput, "output", "o", "", "Archivo de salida para guardar los resultados")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagTimeout, "timeout", "t", 1, "Tiempo de espera del escaneo en segundos")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagDelay, "delay", "d", 250, "Retraso entre escaneos en milisegundos")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagCount, "count", "n", 1, "Número de intentos de escaneo por IP")
+    proxyScanCmd.Flags().IntVarP(&proxyFlagThreads, "threads", "T", 50, "Número de hilos concurrentes")
+    proxyScanCmd.Flags().StringVarP(&proxyFlagProxy, "proxy", "x", "", "Proxy y puerto a usar (ej., 192.168.1.1:8080)")
 }
 
-func proxyScanHost(ip string, timeout, count int, proxy string) bool {
-    // Implementar la lógica para usar el proxy si se especifica
+func proxyScanHost(ip string, timeout, count int, proxy string) (bool, string, string) {
     pinger, err := ping.NewPinger(ip)
     if err != nil {
-        return false
+        return false, "", ""
     }
     pinger.Count = count
     pinger.Timeout = time.Duration(timeout) * time.Second
     err = pinger.Run()
     if err != nil {
-        return false
+        return false, "", ""
     }
     stats := pinger.Statistics()
-    return stats.PacketsRecv > 0
+    if stats.PacketsRecv > 0 {
+        // Realizar una solicitud HTTP para obtener la información del servidor y el código de estado
+        urlStr := fmt.Sprintf("http://%s", ip)
+        client := &http.Client{
+            Timeout: time.Duration(timeout) * time.Second,
+        }
+        if proxy != "" {
+            proxyURL, err := url.Parse(fmt.Sprintf("http://%s", proxy))
+            if err != nil {
+                return true, "", ""
+            }
+            client.Transport = &http.Transport{
+                Proxy: http.ProxyURL(proxyURL),
+            }
+        }
+        resp, err := client.Get(urlStr)
+        if err != nil {
+            return true, "", ""
+        }
+        defer resp.Body.Close()
+        server := resp.Header.Get("Server")
+        status := resp.Status
+        return true, server, status
+    }
+    return false, "", ""
 }
 
 func proxyScanRun(cmd *cobra.Command, args []string) {
@@ -67,7 +92,7 @@ func proxyScanRun(cmd *cobra.Command, args []string) {
     if proxyFlagCIDR != "" {
         ip, ipnet, err := net.ParseCIDR(proxyFlagCIDR)
         if err != nil {
-            fmt.Println("Invalid CIDR:", err)
+            fmt.Println("Rango CIDR inválido:", err)
             return
         }
         for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
@@ -78,7 +103,7 @@ func proxyScanRun(cmd *cobra.Command, args []string) {
     if proxyFlagFile != "" {
         file, err := os.Open(proxyFlagFile)
         if err != nil {
-            fmt.Println("Error opening file:", err)
+            fmt.Println("Error al abrir el archivo:", err)
             return
         }
         defer file.Close()
@@ -88,7 +113,7 @@ func proxyScanRun(cmd *cobra.Command, args []string) {
             ips = append(ips, scanner.Text())
         }
         if err := scanner.Err(); err != nil {
-            fmt.Println("Error reading file:", err)
+            fmt.Println("Error al leer el archivo:", err)
             return
         }
     }
@@ -109,11 +134,13 @@ func proxyScanRun(cmd *cobra.Command, args []string) {
             defer func() { <-sem }()
             progress := float64(i+1) / float64(total) * 100
 
-            if proxyScanHost(ip, proxyFlagTimeout, proxyFlagCount, proxyFlagProxy) {
+            success, server, status := proxyScanHost(ip, proxyFlagTimeout, proxyFlagCount, proxyFlagProxy)
+            if success {
                 mu.Lock()
                 found++
-                results = append(results, ip)
-                fmt.Printf("\n%s\n", green(ip)) // Mostrar IP en color verde en una línea independiente
+                result := fmt.Sprintf("%s - %s - %s", ip, server, status)
+                results = append(results, result)
+                fmt.Printf("\n%s\n", green(result)) // Mostrar IP, servidor y estado en color verde en una línea independiente
                 mu.Unlock()
             }
 
@@ -135,7 +162,7 @@ func proxyScanRun(cmd *cobra.Command, args []string) {
     if proxyFlagOutput != "" {
         err := os.WriteFile(proxyFlagOutput, []byte(strings.Join(results, "\n")), 0644)
         if err != nil {
-            fmt.Println("Error writing to output file:", err)
+            fmt.Println("Error al escribir en el archivo de salida:", err)
         }
     }
 
